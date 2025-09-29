@@ -10,6 +10,7 @@ const wss = new WebSocketServer({ server })
 
 let sockets = []
 
+// WebSocket connection from widget (OBS/Framer/etc.)
 wss.on("connection", ws => {
   sockets.push(ws)
   console.log("Frontend connected")
@@ -32,8 +33,25 @@ const client = new tmi.Client({
 
 client.connect()
 
+// Debug log when connected to Twitch
+client.on("connected", (addr, port) => {
+  console.log(`Connected to Twitch chat at ${addr}:${port}`)
+})
+
+// Debug log for join event
+client.on("join", (channel, username, self) => {
+  if (self) {
+    console.log(`Bot joined channel: ${channel}`)
+  }
+})
+
+// Handle incoming Twitch chat messages
 client.on("message", (channel, tags, message, self) => {
   if (self) return
+
+  // Debug: log every message received from Twitch
+  console.log("Message received from Twitch:", tags.username, message)
+
   const payload = {
     user: tags["display-name"] || tags.username,
     message,
@@ -42,6 +60,10 @@ client.on("message", (channel, tags, message, self) => {
       mod: tags.mod || false,
     },
   }
+
+  // Debug: show payload being sent to frontend
+  console.log("Forwarding payload to clients:", payload)
+
   sockets.forEach(ws => ws.send(JSON.stringify(payload)))
 })
 
