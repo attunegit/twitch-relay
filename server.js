@@ -1,25 +1,63 @@
+// server.js
 import express from "express";
+import http from "http";
+import { WebSocketServer } from "ws";
 import cors from "cors";
-import dotenv from "dotenv";
 import tmi from "tmi.js";
-
-dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔎 Debug: log env variables on startup
-console.log("🔎 DEBUG ENV", {
-  TWITCH_BOT_USERNAME: process.env.TWITCH_BOT_USERNAME,
-  TWITCH_OAUTH: process.env.TWITCH_OAUTH,
-  TWITCH_CHANNEL: process.env.TWITCH_CHANNEL,
-  PORT: process.env.PORT,
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+// 🔹 Task state shared across all clients
+let tasks = {}; // { username: { todos: [{ text, done }], userColor } }
+
+// 🔹 Broadcast helper
+function broadcast(action, payload = {}) {
+  const message = JSON.stringify({ action, ...payload });
+  console.log("📢 Broadcasting:", message);
+
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      client.send(message);
+    }
+  });
+}
+
+// 🔹 Express endpoint for manual updates (from frontend fetch)
+app.post("/task-update", (req, res) => {
+  const { action, username, taskText, userColor } = req.body;
+  console.log("📥 Received update:", req.body);
+
+  if (action === "addTask") {
+    if (!tasks[username]) {
+      tasks[username] = { todos: [], userColor: userColor || "#000" };
+    }
+    tasks[username].todos.push({ text: taskText, done: false });
+    broadcast("addTask", { username, taskText, userColor });
+  }
+
+  if (action === "markTaskDone") {
+    let t = tasks[username]?.todos.find((t) => t.text === taskText);
+    if (t) t.done = true;
+    broadcast("markTaskDone", { username, taskText });
+  }
+
+  if (action === "clearAllTasks") {
+    tasks = {};
+    broadcast("clearAllTasks", {});
+  }
+
+  res.json({ status: "ok" });
 });
 
-// Twitch client setup
+// 🔹 Twitch Chat Bot
 const client = new tmi.Client({
   options: { debug: true },
+  connection: { reconnect: true, secure: true },
   identity: {
     username: process.env.TWITCH_BOT_USERNAME,
     password: process.env.TWITCH_OAUTH,
@@ -27,52 +65,44 @@ const client = new tmi.Client({
   channels: [process.env.TWITCH_CHANNEL],
 });
 
-// Connect to Twitch
-client.connect().catch((err) => {
-  console.error("❌ Error connecting to Twitch:", err);
-});
+client.connect().catch(console.error);
 
-// Example endpoint
-app.get("/", (req, res) => {
-  res.send("✅ Twitch Relay is running");
-});
-
-// Broadcast messages to all connected clients
-let sockets = [];
 client.on("message", (channel, tags, message, self) => {
   if (self) return;
-  const payload = {
-    user: tags["display-name"] || tags.username,
-    message,
-    flags: {
-      broadcaster: tags.badges?.broadcaster === "1",
-      mod: tags.mod,
-    },
-  };
-  console.log("💬 New chat message:", payload);
-  sockets.forEach((ws) => ws.send(JSON.stringify(payload)));
+  const user = tags["display-name"] || tags.username;
+
+  console.log(`💬 ${user}: ${message}`);
+  const parts = message.trim().split(" ");
+  const command = parts[0].toLowerCase();
+  const args = parts.slice(1).join(" ");
+
+  if (command === "!add") {
+    if (!tasks[user]) tasks[user] = { todos: [], userColor: "#000" };
+    tasks[user].todos.push({ text: args, done: false });
+    broadcast("addTask", { username: user, taskText: args, userColor: "#000" });
+  }
+
+  if (command === "!done") {
+    let t = tasks[user]?.todos.find((t) => t.text === args);
+    if (t) t.done = true;
+    broadcast("markTaskDone", { username: user, taskText: args });
+  }
+
+  if (command === "!clear" && (tags.mod || tags.badges?.broadcaster)) {
+    tasks = {};
+    broadcast("clearAllTasks", {});
+  }
 });
 
-// WebSocket server
-import { WebSocketServer } from "ws";
-const wss = new WebSocketServer({ noServer: true });
-
+// 🔹 WebSocket Connection
 wss.on("connection", (ws) => {
-  sockets.push(ws);
-  console.log("🔗 New WebSocket connection");
+  console.log("🔌 Frontend connected");
 
-  ws.on("close", () => {
-    sockets = sockets.filter((s) => s !== ws);
-    console.log("❌ WebSocket disconnected");
-  });
+  // Send current task state to new client
+  ws.send(JSON.stringify({ action: "init", tasks }));
 });
 
-const server = app.listen(process.env.PORT || 10000, "0.0.0.0", () => {
-  console.log(`✅ Server listening on 0.0.0.0:${process.env.PORT || 10000}`);
-});
-
-server.on("upgrade", (request, socket, head) => {
-  wss.handleUpgrade(request, socket, head, (ws) => {
-    wss.emit("connection", ws, request);
-  });
-});
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, "0.0.0.0", () =>
+  console.log(`✅ Server listening on 0.0.0.0:${PORT}`)
+);
