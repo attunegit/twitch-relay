@@ -1,63 +1,80 @@
 import express from "express";
-import cors from "cors";
+import http from "http";
 import { WebSocketServer } from "ws";
 import tmi from "tmi.js";
+import cors from "cors";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
-const server = app.listen(process.env.PORT || 10000, "0.0.0.0", () => {
-  console.log(`✅ Server listening on 0.0.0.0:${process.env.PORT || 10000}`);
-});
-
+const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// Store all WebSocket clients
-let clients = [];
+let sockets = [];
 
+// 🔹 WebSocket connection
 wss.on("connection", (ws) => {
-  console.log("🔌 Frontend connected");
-  clients.push(ws);
+  console.log("🟢 WebSocket client connected");
+  sockets.push(ws);
 
   ws.on("close", () => {
-    console.log("❌ Frontend disconnected");
-    clients = clients.filter((c) => c !== ws);
+    console.log("🔴 WebSocket client disconnected");
+    sockets = sockets.filter((s) => s !== ws);
   });
 });
 
-// Broadcast helper
+// 🔹 Broadcast function
 function broadcast(data) {
-  clients.forEach((c) => {
-    if (c.readyState === 1) {
-      c.send(JSON.stringify(data));
+  sockets.forEach((ws) => {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify(data));
     }
   });
 }
 
-// ---- Twitch Chat ----
+// 🔹 Twitch Chat Client
 const client = new tmi.Client({
   options: { debug: true },
   identity: {
     username: process.env.TWITCH_BOT_USERNAME,
-    password: process.env.TWITCH_OAUTH,
+    password: process.env.TWITCH_OAUTH, // ⚠️ Must include "oauth:" prefix
   },
   channels: [process.env.TWITCH_CHANNEL],
 });
 
-client.connect();
-
-client.on("message", (channel, userstate, message, self) => {
+// 🔹 Handle Twitch messages
+client.on("message", (channel, tags, message, self) => {
   if (self) return;
 
-  console.log("📩 Chat:", { user: userstate.username, message });
+  const user = tags["display-name"] || tags.username;
+  console.log({ user, message });
 
   if (message.startsWith("!add ")) {
-    const task = message.slice(5);
-    broadcast({
-      type: "add",
-      username: userstate.username,
-      color: userstate.color || "#fff",
-      task,
-    });
+    const task = message.replace("!add ", "").trim();
+    broadcast({ type: "addTask", user, color: tags.color, task });
   }
+
+  if (message.startsWith("!done ")) {
+    const task = message.replace("!done ", "").trim();
+    broadcast({ type: "markTaskDone", user, task });
+  }
+
+  if (message === "!clearall") {
+    broadcast({ type: "clearAllTasks" });
+  }
+});
+
+// 🔹 Error-safe connection
+client.connect().catch((err) => {
+  console.error("❌ Failed to connect to Twitch:", err.message);
+});
+
+// 🔹 Start server
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Server listening on 0.0.0.0:${PORT}`);
 });
