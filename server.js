@@ -1,57 +1,63 @@
-// server.js
 import express from "express";
-import http from "http";
-import { WebSocketServer } from "ws";
 import cors from "cors";
+import { WebSocketServer } from "ws";
+import tmi from "tmi.js";
 
 const app = express();
-const server = http.createServer(app);
+app.use(cors());
+
+const server = app.listen(process.env.PORT || 10000, "0.0.0.0", () => {
+  console.log(`✅ Server listening on 0.0.0.0:${process.env.PORT || 10000}`);
+});
+
 const wss = new WebSocketServer({ server });
 
-app.use(cors());
-app.use(express.json());
-
-// Store connected WebSocket clients
+// Store all WebSocket clients
 let clients = [];
 
-// WebSocket connection handling
 wss.on("connection", (ws) => {
-  console.log("🔌 Client connected via WebSocket");
+  console.log("🔌 Frontend connected");
   clients.push(ws);
 
   ws.on("close", () => {
-    console.log("❌ Client disconnected");
-    clients = clients.filter((client) => client !== ws);
+    console.log("❌ Frontend disconnected");
+    clients = clients.filter((c) => c !== ws);
   });
 });
 
 // Broadcast helper
-function broadcast(message) {
-  console.log("📢 Broadcasting update:", message);
-  clients.forEach((client) => {
-    if (client.readyState === 1) {
-      client.send(JSON.stringify(message));
+function broadcast(data) {
+  clients.forEach((c) => {
+    if (c.readyState === 1) {
+      c.send(JSON.stringify(data));
     }
   });
 }
 
-// REST endpoint: called by OBS/Framer widget via fetch()
-app.post("/task-update", (req, res) => {
-  const { action, username, taskText, userColor } = req.body;
-  console.log("📩 Received task-update:", req.body);
-
-  // Broadcast to all clients
-  broadcast({ action, username, taskText, userColor });
-
-  res.json({ status: "ok", received: req.body });
+// ---- Twitch Chat ----
+const client = new tmi.Client({
+  options: { debug: true },
+  identity: {
+    username: process.env.TWITCH_BOT_USERNAME,
+    password: process.env.TWITCH_OAUTH,
+  },
+  channels: [process.env.TWITCH_CHANNEL],
 });
 
-// Root test
-app.get("/", (req, res) => {
-  res.send("✅ Twitch Relay Server is running");
-});
+client.connect();
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+client.on("message", (channel, userstate, message, self) => {
+  if (self) return;
+
+  console.log("📩 Chat:", { user: userstate.username, message });
+
+  if (message.startsWith("!add ")) {
+    const task = message.slice(5);
+    broadcast({
+      type: "add",
+      username: userstate.username,
+      color: userstate.color || "#fff",
+      task,
+    });
+  }
 });
